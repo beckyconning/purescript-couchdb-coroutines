@@ -11,6 +11,7 @@ import Control.Monad.Eff
 import Control.Monad.Eff.Class
 import Control.Monad.Eff.Console
 import Control.Monad.Eff.Random
+import Control.Monad.Eff.Ref
 import Control.Monad.Rec.Class
 import Control.Monad.Free.Trans
 import Data.Tuple
@@ -34,19 +35,6 @@ import Debug.Trace
 import Data.CouchDB
 import Control.Coroutine.CouchDB
 
---newtype QCChange       = QCChange Change
---newtype QCResult       = QCResult Result
---newtype QCNotification = QCNotification Notification
---
---runQCChange :: QCChange -> Change
---runQCChange (QCChange change) = change
---
---runQCResult :: QCResult -> Result
---runQCResult (QCResult result) = result
---
---runQCNotification :: QCNotification -> Notification
---runQCNotification (QCNotification notification) = notification
-
 popSTArray :: forall a h eff. STArray h a -> Eff (st :: ST h | eff) (Maybe a)
 popSTArray stArr = do
   arr <- freeze stArr
@@ -68,13 +56,19 @@ collect' = tailRecM go []
   go :: Array a -> Transformer a (Array a) m (Either (Array a) r)
   go xs = liftFreeT $ Transform \x -> Tuple (xs <> [x]) (Left (xs <> [x]))
 
-asyncQuickCheck :: forall a b eff. (Arbitrary a) =>
-  String -> Int -> ((Boolean -> Eff _ Unit) -> a -> Eff _ Unit) -> Eff _ Unit
+type AsyncQuickCheckEff eff =
+  Eff (exit :: EXIT, console :: CONSOLE, ref :: REF, random :: RANDOM | eff) Unit
+
+type AsyncQuickCheckable a eff =
+  (Boolean -> AsyncQuickCheckEff eff) -> a -> AsyncQuickCheckEff eff
+
+asyncQuickCheck :: forall a eff. (Arbitrary a) =>
+  String -> Int -> AsyncQuickCheckable a eff -> AsyncQuickCheckEff eff
 asyncQuickCheck s n f = do
-  stTestResults <- emptySTArray
+  refTestResults <- newRef []
   let done result = do
-        pushSTArray stTestResults result
-        testResults <- freeze stTestResults
+        modifyRef refTestResults (result :)
+        testResults <- readRef refTestResults
         if (length testResults == n) then allDone testResults else return unit
   liftEff $ randomSample' n arbitrary >>= (flip foreachE) (f done)
     where

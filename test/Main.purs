@@ -10,6 +10,7 @@ import Control.Monad.Aff
 import Control.Monad.Eff
 import Control.Monad.Eff.Class
 import Control.Monad.Eff.Console
+import Control.Monad.Eff.Random
 import Control.Monad.Rec.Class
 import Control.Monad.Free.Trans
 import Data.Tuple
@@ -17,13 +18,18 @@ import Control.Monad.ST
 import Data.Array hiding (filter)
 import Data.Array.ST
 import Data.Either
+import Data.Foldable
 import Data.Functor (($>))
+import Data.Generic
 import Data.Maybe
 import Data.Tuple
 
 import Test.Unit
 import Test.QuickCheck.Arbitrary
 import Test.QuickCheck.Gen
+import Test.Process
+
+import Debug.Trace
 
 import Data.CouchDB
 import Control.Coroutine.CouchDB
@@ -47,26 +53,54 @@ popSTArray stArr = do
   spliceSTArray stArr 0 1 []
   return $ head arr
 
-getStubGet :: forall a b eff1 eff2. (Show a) =>
-  Array (Either String a) -> Eff (st :: ST b | eff1) (Int -> Eff (st :: ST b | eff2) (Either String a))
+getStubGet :: forall a b eff1 eff2.
+  Array (Either Unit a) ->
+  Eff (st :: ST b | eff1) (Int -> Eff (st :: ST b | eff2) (Either Unit a))
 getStubGet results = do
   mutableResults <- thaw results
   return $ \_ -> do
     currentResult <- popSTArray mutableResults
-    return $ maybe (Left "Ran out of values") id currentResult
+    return $ maybe (Left unit) id currentResult
 
-collect :: forall a m r. (Monad m) => Transformer a (Array a) m r
-collect = tailRecM go []
+collect' :: forall a m r. (Monad m) => Transformer a (Array a) m r
+collect' = tailRecM go []
   where
   go :: Array a -> Transformer a (Array a) m (Either (Array a) r)
   go xs = liftFreeT $ Transform \x -> Tuple (xs <> [x]) (Left (xs <> [x]))
 
+asyncQuickCheck :: forall a b eff. (Arbitrary a) => String -> Int -> ((Boolean -> Eff _ Unit) -> a -> Eff _ Unit) -> Eff _ Unit
+asyncQuickCheck s n f = do
+  stTestResults <- emptySTArray
+  let done :: Boolean -> Eff _ Unit
+      done result = do
+        pushSTArray stTestResults result
+        testResults <- freeze stTestResults
+        if (length testResults == n) then allDone testResults else return unit
+  liftEff $ randomSample' n arbitrary >>= (flip foreachE) (f done)
+    where
+    allDone :: Array Boolean -> Eff _ Unit
+    allDone xs = case ((foldl (&&) true xs)) of
+      true -> log $ "  ✔︎ " ++ s
+      false -> log ("  ✘ " ++ s) *> exit 1
+
+take' :: forall a m. (Monad m) => Int -> Transformer (Array a) (Maybe (Array a)) m Unit
+take' n = forever (transform maybeTake)
+  where
+  maybeTake :: forall a. Array a -> Maybe (Array a)
+  maybeTake xs | length xs == n = Just $ take n xs
+  maybeTake _ = Nothing
+
+transform' :: forall a b m. (Monad m) => (a -> b) -> Transformer (Maybe a) (Maybe b) m Unit
+transform' g = forever (transform (>>= (return <<< g)))
+
 main = do
-  randomSample' 25 arbitrary >>= (flip foreachE) \notifications -> runTest do
-    test "produceNotifications" do
-      assertFn "should produce notifications sequentially" \done -> do
-        stubGet <- getStubGet notifications
-        let f xs = if length xs == length notifications then done (xs == notifications) else return unit
-        let c = consumer (($> Nothing) <<< liftEff <<< f <<< (Right <$>))
-        let p = produceNotifications (liftEff <<< stubGet) 0
-        launchAff $ later $ runProcess (p $~ collect $$ c)
+  log "produceNotifications:" *> do
+    asyncQuickCheck "Should produce notifications sequentially." 50 \done notifications -> do
+      let nonEmptyNotifications = fst notifications : snd notifications
+      let results = (Right <$> nonEmptyNotifications) :: Array (Either Unit Notification)
+      stubGet <- liftEff $ getStubGet results
+      let p = produceNotifications (liftEff <<< stubGet) 0
+      let eqNonEmptyNotifications = transform' (gEq nonEmptyNotifications)
+      let t = collect' ~~ (take' (length nonEmptyNotifications)) ~~ eqNonEmptyNotifications
+      let c = consumer (($> Nothing) <<< liftEff <<< maybe (return unit) done)
+      launchAff $ runProcess (p $~ t $$ c)

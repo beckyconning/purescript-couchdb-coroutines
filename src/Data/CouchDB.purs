@@ -6,6 +6,7 @@ import Prelude
 import Data.Foreign
 import Data.Foreign.Class
 import Data.Foreign.Undefined
+import Data.Generic
 import Data.Maybe
 import Test.QuickCheck.Arbitrary
 
@@ -22,25 +23,9 @@ exampleResult = Result  { seq: 1
 
 exampleNotification = Notification { last_seq: 1, results: [ exampleResult ] }
 
-instance eqChange :: Eq Change where
-  eq (Change o1) (Change o2) = (o1.rev `eq` o2.rev)
-
-instance eqResult :: Eq Result where
-  eq (Result o1) (Result o2) = (o1.seq `eq` o2.seq) `conj` (o1.id `eq` o2.id)
-                                                    `conj` (o1.deleted `eq` o2.deleted)
-                                                    `conj` (o1.changes `eq` o2.changes)
-
-instance eqNotification :: Eq Notification where
-  eq (Notification o1) (Notification o2) = (o1.last_seq `eq` o2.last_seq) `conj` (o1.results `eq` o2.results)
-
-instance showChange :: Show Change where
-  show (Change o) = "Change " ++ "{ rev: " ++ o.rev ++ " }"
-
-instance showResult :: Show Result where
-  show (Result o) = "Result " ++ "{ seq: " ++ show o.seq ++ ", id: " ++ show o.id ++ ", deleted: " ++ show o.deleted ++ ", changes: " ++ show o.changes ++ " }"
-
-instance showNotification :: Show Notification where
-  show (Notification o) = "Notification " ++ "{ last_seq: " ++ show o.last_seq ++ ", results: " ++ show o.results ++ " }"
+derive instance genericChange :: Generic Change
+derive instance genericResult :: Generic Result
+derive instance genericNotification :: Generic Notification
 
 instance arbChange :: Arbitrary Change where
   arbitrary = Change <$> ({ rev: _ } <$> arbitrary)
@@ -58,4 +43,4 @@ instance arbNotification :: Arbitrary Notification where
 changesUrl :: String -> String -> Int -> String
 changesUrl couchDBURL dBName sinceSeq = couchDBURL ++ "/" ++ dBName ++ query
   where
-  query = "/_changes?feed=longpoll&since=" ++ show sinceSeq
+  query = "/_changes?feed=longpoll&since=" ++ gShow sinceSeq
